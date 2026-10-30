@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="uz">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Sirli xonalar</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root { --bg:#0b0d14; --accent:#ffb23f; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:var(--bg); overflow:hidden; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; color:#fff; touch-action:none; user-select:none; -webkit-user-select:none; }
+  canvas { position:fixed; inset:0; width:100%; height:100%; display:block; }
+
+  #loader { position:fixed; inset:0; z-index:50; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; background:radial-gradient(circle at 30% 20%, #2a1626, #0b0d14 70%); transition:opacity .6s; }
+  #loader.hide { opacity:0; pointer-events:none; }
+  #loader h1 { margin:0; font-size:32px; letter-spacing:.5px; }
+  #loader h1 span { color:var(--accent); }
+  #loader p { margin:0; color:#8d97ad; letter-spacing:3px; font-size:12px; text-transform:uppercase; }
+  .spin { width:44px; height:44px; border-radius:50%; border:4px solid #23283a; border-top-color:#e84a9a; animation:sp 1s linear infinite; }
+  @keyframes sp { to { transform:rotate(360deg); } }
+  #err { color:#ff8a8a; max-width:80%; text-align:center; font-size:14px; }
+
+  #lightBtn { position:fixed; z-index:20; right:14px; top:calc(env(safe-area-inset-top,0px) + 70px); width:52px; height:52px; border-radius:50%; border:1px solid rgba(255,255,255,.2); background:rgba(20,24,38,.7); color:#fff; font-size:24px; backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); }
+  #lightBtn:active { transform:scale(.92); }
+
+  #joy { position:fixed; z-index:20; left:24px; bottom:calc(env(safe-area-inset-bottom,0px) + 36px); width:128px; height:128px; border-radius:50%; background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.18); touch-action:none; }
+  #knob { position:absolute; left:50%; top:50%; width:56px; height:56px; margin:-28px 0 0 -28px; border-radius:50%; background:rgba(255,255,255,.35); border:1px solid rgba(255,255,255,.5); }
+
+  #hint { position:fixed; z-index:20; left:0; right:0; top:calc(env(safe-area-inset-top,0px) + 74px); text-align:center; font-size:13px; color:#cfd6e6; text-shadow:0 1px 4px #000; pointer-events:none; transition:opacity 1s; }
+  #hint.hide { opacity:0; }
+
+  #viewer { position:fixed; inset:0; z-index:40; background:rgba(0,0,0,.92); display:none; align-items:center; justify-content:center; padding:16px; }
+  #viewer.show { display:flex; }
+  #viewer img { max-width:100%; max-height:100%; border-radius:8px; box-shadow:0 8px 40px #000; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="loader">
+  <h1>Sirli <span>xonalar</span></h1>
+  <p>Eshikni ochyapmiz</p>
+  <div class="spin" id="spin"></div>
+  <div id="err"></div>
+</div>
+
+<button id="lightBtn" aria-label="Yorug'lik">🌙</button>
+<div id="joy"><div id="knob"></div></div>
+<div id="hint">Chap pastdagi joystik bilan yuring · rasmga bosing · ekranni suring — aylantirish</div>
+<div id="viewer"><img id="viewerImg" alt=""></div>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ---------- Telegram ----------
+const tg = window.Telegram?.WebApp;
+if (tg) {
+  try { tg.ready(); tg.expand(); } catch (e) {}
+  try { tg.setHeaderColor('#0b0d14'); tg.setBackgroundColor('#0b0d14'); } catch (e) {}
+  try { tg.disableVerticalSwipes?.(); } catch (e) {}
+}
+const haptic = (t = 'light') => { try { tg?.HapticFeedback?.impactOccurred(t); } catch (e) {} };
+
+const params = new URLSearchParams(location.search);
+const gid = tg?.initDataUnsafe?.start_param || params.get('g') || '';
+
+// ---------- Galereya ----------
+async function loadGallery() {
+  if (!gid) return [];
+  const r = await fetch('/api/gallery/' + encodeURIComponent(gid));
+  if (!r.ok) throw new Error('Galereya topilmadi');
+  const j = await r.json();
+  return j.images || [];
+}
+
+// ---------- Sahna ----------
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight, false);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 100);
+
+const BG_LIGHT = new THREE.Color(0xdde4f0);
+const BG_DARK = new THREE.Color(0x04050a);
+scene.background = BG_LIGHT.clone();
+scene.fog = new THREE.Fog(BG_LIGHT.clone(), 18, 45);
+
+const ambient = new THREE.AmbientLight(0xffffff, 1.4);
+const hemi = new THREE.HemisphereLight(0xfff4e0, 0x667799, 1.0);
+scene.add(ambient, hemi);
+
+const W = 10, D = 10, H = 4, T = 0.3, DOOR_W = 2.6, DOOR_H = 2.8;
+const colliders = [];
+const roomLights = [];
+const spotLights = [];
+const wallMeshes = [];
+const pictureMats = [];
+const pickables = [];
+
+const roomPalette = [0xe8c9a0, 0xb9d3c2, 0xc9b8e0, 0xe0b8b8, 0xb8cde0, 0xe0dba8];
+
+function addBox(cx, cz, sx, sz, y0, h, mat, collide = true) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(sx, h, sz), mat);
+  m.position.set(cx, y0 + h / 2, cz);
+  scene.add(m);
+  wallMeshes.push(m);
+  if (collide) colliders.push({ minX: cx - sx / 2, maxX: cx + sx / 2, minZ: cz - sz / 2, maxZ: cz + sz / 2 });
+  return m;
+}
+
+function buildFrame(group) {
+  const frame = new THREE.Mesh(
+    new THREE.BoxGeometry(1, 1, 0.08),
+    new THREE.MeshStandardMaterial({ color: 0x3b2a1e, roughness: 0.6 })
+  );
+  const mat = new THREE.MeshBasicMaterial({ color: 0xcccccc });
+  pictureMats.push(mat);
+  const pic = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat);
+  pic.position.z = 0.045;
+  group.add(frame, pic);
+  return { frame, pic, mat };
+}
+
+function placePicture(src, x, y, z, rotY) {
+  const g = new THREE.Group();
+  g.position.set(x, y, z);
+  g.rotation.y = rotY;
+  scene.add(g);
+  const { frame, pic, mat } = buildFrame(g);
+  const maxW = 2.6, maxH = 1.9;
+  frame.scale.set(maxW + 0.2, maxH + 0.2, 1);
+  pic.scale.set(maxW, maxH, 1);
+  pic.userData.src = src;
+  const sp = new THREE.SpotLight(0xffd9a0, 30, 11, 0.7, 0.8, 2);
+  const nx = Math.sin(rotY), nz = Math.cos(rotY);
+  sp.position.set(x + nx * 2.4, y + 1.4, z + nz * 2.4);
+  sp.target.position.set(x, y - 0.2, z);
+  scene.add(sp, sp.target);
+  spotLights.push(sp);
+  pickables.push(pic);
+  new THREE.TextureLoader().load(src, (tex) => {
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 4;
+    const a = tex.image.width / tex.image.height;
+    let w = maxW, h = maxW / a;
+    if (h > maxH) { h = maxH; w = maxH * a; }
+    pic.scale.set(w, h, 1);
+    frame.scale.set(w + 0.2, h + 0.2, 1);
+    mat.map = tex;
+    mat.needsUpdate = true;
+    applyLight(lightVal);
+  });
+}
+
+function buildWorld(images) {
+  const rooms = Math.max(1, Math.ceil(images.length / 4));
+  let imgIdx = 0;
+
+  for (let i = 0; i < rooms; i++) {
+    const cx = i * W;
+    const col = roomPalette[i % roomPalette.length];
+    const wallMat = new THREE.MeshStandardMaterial({ color: col, roughness: 0.95 });
+    const floorMat = new THREE.MeshStandardMaterial({ color: i % 2 ? 0x6a5a4a : 0x7c6a56, roughness: 0.85 });
+
+    // pol
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(W, D), floorMat);
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.set(cx, 0, 0);
+    scene.add(floor);
+
+    // shift (yopiq)
+    const ceil = new THREE.Mesh(
+      new THREE.PlaneGeometry(W, D),
+      new THREE.MeshStandardMaterial({ color: 0x17130f, roughness: 1, side: THREE.DoubleSide })
+    );
+    ceil.rotation.x = Math.PI / 2;
+    ceil.position.set(cx, H, 0);
+    scene.add(ceil);
+
+    // shimoliy va janubiy devor
+    addBox(cx, -D / 2, W + T, T, 0, H, wallMat);
+    addBox(cx, D / 2, W + T, T, 0, H, wallMat);
+
+    // chap devor (faqat birinchi xona)
+    if (i === 0) addBox(cx - W / 2, 0, T, D, 0, H, wallMat);
+
+    // o'ng devor: eshikli (keyingi xona bor) yoki yaxlit (oxirgisi)
+    const wx = cx + W / 2;
+    if (i < rooms - 1) {
+      const side = (D - DOOR_W) / 2;
+      addBox(wx, -(DOOR_W / 2 + side / 2), T, side, 0, H, wallMat);
+      addBox(wx, (DOOR_W / 2 + side / 2), T, side, 0, H, wallMat);
+      addBox(wx, 0, T, DOOR_W, DOOR_H, H - DOOR_H, wallMat, false); // peshtoq
+    } else {
+      addBox(wx, 0, T, D, 0, H, wallMat);
+    }
+
+    // lampa
+    const lamp = new THREE.Mesh(
+      new THREE.SphereGeometry(0.18, 16, 12),
+      new THREE.MeshBasicMaterial({ color: 0xffe2a8 })
+    );
+    lamp.position.set(cx, H - 0.5, 0);
+    scene.add(lamp);
+    const pl = new THREE.PointLight(0xffd9a0, 6, 18, 2);
+    pl.position.set(cx, H - 0.6, 0);
+    scene.add(pl);
+    roomLights.push(pl);
+
+    // rasmlar: har xonada 4 tadan (shimol 2, janub 2)
+    const slots = [
+      [-2.6, -D / 2 + T / 2 + 0.05, 0],
+      [2.6, -D / 2 + T / 2 + 0.05, 0],
+      [-2.6, D / 2 - T / 2 - 0.05, Math.PI],
+      [2.6, D / 2 - T / 2 - 0.05, Math.PI],
+    ];
+    for (const [ox, z, rot] of slots) {
+      if (imgIdx >= images.length) break;
+      placePicture(images[imgIdx++], cx + ox, 1.95, z, rot);
+    }
+  }
+  return rooms;
+}
+
+// ---------- Pingvin ----------
+function makePlayer() {
+  const g = new THREE.Group();
+  const black = new THREE.MeshStandardMaterial({ color: 0x1b1d26, roughness: 0.7 });
+  const white = new THREE.MeshStandardMaterial({ color: 0xf4efe6, roughness: 0.8 });
+  const orange = new THREE.MeshStandardMaterial({ color: 0xff8a2b, roughness: 0.6 });
+  const eyeW = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const pupil = new THREE.MeshBasicMaterial({ color: 0x0a0a0a });
+
+  function ell(mat, rx, ry, rz, x, y, z, parent) {
+    const m = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 16), mat);
+    m.scale.set(rx, ry, rz);
+    m.position.set(x, y, z);
+    parent.add(m);
+    return m;
+  }
+
+  const body = new THREE.Group();
+  g.add(body);
+  ell(black, 0.36, 0.46, 0.32, 0, 0.58, 0, body);        // tana
+  ell(white, 0.28, 0.38, 0.2, 0, 0.52, 0.17, body);      // qorin
+  ell(black, 0.3, 0.27, 0.27, 0, 1.0, 0, body);          // bosh
+  ell(white, 0.12, 0.14, 0.08, -0.1, 0.99, 0.2, body);   // yuz dog'lari
+  ell(white, 0.12, 0.14, 0.08, 0.1, 0.99, 0.2, body);
+  ell(eyeW, 0.055, 0.055, 0.03, -0.1, 1.03, 0.275, body); // ko'zlar
+  ell(eyeW, 0.055, 0.055, 0.03, 0.1, 1.03, 0.275, body);
+  ell(pupil, 0.03, 0.03, 0.02, -0.1, 1.03, 0.305, body);
+  ell(pupil, 0.03, 0.03, 0.02, 0.1, 1.03, 0.305, body);
+
+  const beak = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.18, 14), orange);
+  beak.rotation.x = Math.PI / 2;
+  beak.position.set(0, 0.93, 0.34);
+  body.add(beak);
+
+  function pivot(x, y, parent) {
+    const p = new THREE.Group();
+    p.position.set(x, y, 0);
+    parent.add(p);
+    return p;
+  }
+  // qanotlar
+  const armL = pivot(-0.36, 0.82, body);
+  const armR = pivot(0.36, 0.82, body);
+  ell(black, 0.06, 0.24, 0.13, -0.04, -0.2, 0, armL);
+  ell(black, 0.06, 0.24, 0.13, 0.04, -0.2, 0, armR);
+  armL.rotation.z = 0.3;
+  armR.rotation.z = -0.3;
+  // oyoqlar
+  const legL = pivot(-0.14, 0.14, g);
+  const legR = pivot(0.14, 0.14, g);
+  ell(orange, 0.11, 0.045, 0.17, 0, -0.1, 0.08, legL);
+  ell(orange, 0.11, 0.045, 0.17, 0, -0.1, 0.08, legR);
+
+  g.userData = { legL, legR, armL, armR, body };
+  return g;
+}
+
+// ---------- Boshqaruv ----------
+const input = { jx: 0, jy: 0 };
+const keys = {};
+addEventListener('keydown', (e) => { keys[e.code] = true; });
+addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+const joy = document.getElementById('joy');
+const knob = document.getElementById('knob');
+let joyId = null;
+function joyMove(e) {
+  const r = joy.getBoundingClientRect();
+  let dx = e.clientX - (r.left + r.width / 2);
+  let dy = e.clientY - (r.top + r.height / 2);
+  const max = r.width / 2 - 10;
+  const len = Math.hypot(dx, dy);
+  if (len > max) { dx = dx / len * max; dy = dy / len * max; }
+  knob.style.transform = `translate(${dx}px,${dy}px)`;
+  input.jx = dx / max;
+  input.jy = dy / max;
+}
+function joyEnd() {
+  joyId = null;
+  knob.style.transform = '';
+  input.jx = 0; input.jy = 0;
+}
+joy.addEventListener('pointerdown', (e) => { joyId = e.pointerId; joy.setPointerCapture(e.pointerId); joyMove(e); e.preventDefault(); });
+joy.addEventListener('pointermove', (e) => { if (e.pointerId === joyId) joyMove(e); });
+joy.addEventListener('pointerup', (e) => { if (e.pointerId === joyId) joyEnd(); });
+joy.addEventListener('pointercancel', joyEnd);
+
+// kamerani aylantirish va rasmga bosish
+let yaw = 0;
+let drag = null;
+canvas.addEventListener('pointerdown', (e) => {
+  drag = { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now(), moved: 0, lastX: e.clientX };
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (!drag || e.pointerId !== drag.id) return;
+  const dx = e.clientX - drag.lastX;
+  drag.lastX = e.clientX;
+  drag.moved += Math.abs(dx);
+  yaw -= dx * 0.006;
+});
+canvas.addEventListener('pointerup', (e) => {
+  if (!drag || e.pointerId !== drag.id) return;
+  const tap = drag.moved < 8 && performance.now() - drag.t < 350;
+  const x = e.clientX, y = e.clientY;
+  drag = null;
+  if (tap) tryOpenPicture(x, y);
+});
+canvas.addEventListener('pointercancel', () => { drag = null; });
+
+const raycaster = new THREE.Raycaster();
+const viewer = document.getElementById('viewer');
+const viewerImg = document.getElementById('viewerImg');
+function tryOpenPicture(x, y) {
+  const ndc = new THREE.Vector2((x / window.innerWidth) * 2 - 1, -(y / window.innerHeight) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const hit = raycaster.intersectObjects(pickables, false)[0];
+  if (hit) {
+    viewerImg.src = hit.object.userData.src;
+    viewer.classList.add('show');
+    haptic('light');
+  }
+}
+viewer.addEventListener('click', () => viewer.classList.remove('show'));
+
+// ---------- Yorug' / qorong'i ----------
+let lightTarget = 0, lightVal = 0;
+const lightBtn = document.getElementById('lightBtn');
+lightBtn.textContent = '☀️';
+const torch = new THREE.PointLight(0xffe3b0, 0, 9, 2);
+scene.add(torch);
+const lerp = (a, b, t) => a + (b - a) * t;
+
+function applyLight(v) {
+  ambient.intensity = lerp(0.18, 1.4, v);
+  hemi.intensity = lerp(0.08, 1.0, v);
+  for (const l of roomLights) l.intensity = lerp(9, 5, v);
+  for (const l of spotLights) l.intensity = lerp(45, 8, v);
+  torch.intensity = lerp(9, 0, v);
+  scene.background.lerpColors(BG_DARK, BG_LIGHT, v);
+  scene.fog.color.copy(scene.background);
+  const b = lerp(0.7, 1, v);
+  for (const m of pictureMats) m.color.setRGB(b, b, b);
+}
+lightBtn.addEventListener('click', () => {
+  lightTarget = lightTarget > 0.5 ? 0 : 1;
+  lightBtn.textContent = lightTarget > 0.5 ? '🌙' : '☀️';
+  haptic('medium');
+});
+
+// ---------- Paydo bo'lish effekti ----------
+const fx = new THREE.Group();
+scene.add(fx);
+const ring = new THREE.Mesh(
+  new THREE.RingGeometry(0.4, 0.55, 48),
+  new THREE.MeshBasicMaterial({ color: 0xffd166, transparent: true, side: THREE.DoubleSide })
+);
+ring.rotation.x = -Math.PI / 2;
+ring.position.y = 0.04;
+const beam = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.55, 0.55, 5, 24, 1, true),
+  new THREE.MeshBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false })
+);
+beam.position.y = 2.5;
+fx.add(ring, beam);
+const easeOutBack = (x) => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
+
+// ---------- Ishga tushirish ----------
+const player = makePlayer();
+scene.add(player);
+const pos = new THREE.Vector3(-2, 0, 2);
+let faceAngle = Math.PI;
+let walkPhase = 0;
+let spawnT = 0;
+const R = 0.4;
+
+function blocked(x, z) {
+  for (const c of colliders) {
+    if (x > c.minX - R && x < c.maxX + R && z > c.minZ - R && z < c.maxZ + R) return true;
+  }
+  return false;
+}
+
+const loader = document.getElementById('loader');
+let ready = false;
+
+(async function init() {
+  let images = [];
+  try {
+    images = await loadGallery();
+  } catch (e) {
+    document.getElementById('spin').style.display = 'none';
+    document.getElementById('err').textContent = 'Galereya ochilmadi: ' + e.message;
+    return;
+  }
+  buildWorld(images);
+  applyLight(lightVal);
+  player.position.copy(pos);
+  ready = true;
+  setTimeout(() => loader.classList.add('hide'), 400);
+  setTimeout(() => document.getElementById('hint').classList.add('hide'), 9000);
+})();
+
+addEventListener('resize', () => {
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+});
+
+const clock = new THREE.Clock();
+const camTarget = new THREE.Vector3();
+const camPos = new THREE.Vector3(0, 2.3, 6);
+const camHead = new THREE.Vector3(), camDir = new THREE.Vector3();
+const camRay = new THREE.Raycaster();
+
+function tick() {
+  requestAnimationFrame(tick);
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  if (ready) {
+    spawnT += dt;
+
+    // yorug'lik silliq o'zgaradi
+    if (Math.abs(lightVal - lightTarget) > 0.001) {
+      lightVal += (lightTarget - lightVal) * Math.min(dt * 4, 1);
+      applyLight(lightVal);
+    }
+
+    // kirish
+    let fy = -input.jy, fx_ = input.jx;
+    if (keys.KeyW || keys.ArrowUp) fy += 1;
+    if (keys.KeyS || keys.ArrowDown) fy -= 1;
+    if (keys.KeyD || keys.ArrowRight) fx_ += 1;
+    if (keys.KeyA || keys.ArrowLeft) fx_ -= 1;
+    const mag = Math.hypot(fx_, fy);
+    if (mag > 1) { fx_ /= mag; fy /= mag; }
+
+    const canMove = spawnT > 0.8;
+    let moving = false;
+    if (canMove && mag > 0.08) {
+      const fwdX = -Math.sin(yaw), fwdZ = -Math.cos(yaw);
+      const rgtX = Math.cos(yaw), rgtZ = -Math.sin(yaw);
+      const dx = (rgtX * fx_ + fwdX * fy) * 3.2 * dt;
+      const dz = (rgtZ * fx_ + fwdZ * fy) * 3.2 * dt;
+      if (!blocked(pos.x + dx, pos.z)) pos.x += dx;
+      if (!blocked(pos.x, pos.z + dz)) pos.z += dz;
+      faceAngle = Math.atan2(dx, dz);
+      moving = true;
+    }
+
+    // odamcha
+    player.position.copy(pos);
+    let dAng = faceAngle - player.rotation.y;
+    dAng = Math.atan2(Math.sin(dAng), Math.cos(dAng));
+    player.rotation.y += dAng * Math.min(dt * 14, 1);
+    const u = player.userData;
+    if (moving) {
+      walkPhase += dt * 10;
+      const s = Math.sin(walkPhase) * 0.8;
+      u.legL.rotation.x = s * 0.7; u.legR.rotation.x = -s * 0.7;
+      u.armL.rotation.x = -s * 0.5; u.armR.rotation.x = s * 0.5;
+      u.body.rotation.z = Math.sin(walkPhase) * 0.12;
+    } else {
+      for (const k of ['legL', 'legR', 'armL', 'armR']) u[k].rotation.x *= 0.8;
+      u.body.rotation.z *= 0.8;
+    }
+
+    // paydo bo'lish
+    if (spawnT < 1.8) {
+      const s = Math.max(easeOutBack(Math.min(spawnT / 0.9, 1)), 0.001);
+      player.scale.setScalar(s);
+      fx.position.set(-2, 0, 2);
+      ring.scale.setScalar(1 + spawnT * 3.5);
+      ring.material.opacity = Math.max(0, 1 - spawnT / 1.6);
+      beam.material.opacity = Math.max(0, 0.5 * (1 - spawnT / 1.1));
+      beam.scale.set(Math.max(0.05, 1 - spawnT / 1.2), 1, Math.max(0.05, 1 - spawnT / 1.2));
+    } else if (fx.visible) {
+      player.scale.setScalar(1);
+      fx.visible = false;
+    }
+
+    torch.position.set(pos.x, 2.2, pos.z);
+
+    // kamera: pingvin orqasida, devor bo'lsa yaqinlashadi
+    const dist = 3.8, height = 2.3;
+    camHead.set(pos.x, 1.3, pos.z);
+    camTarget.set(pos.x + Math.sin(yaw) * dist, height, pos.z + Math.cos(yaw) * dist);
+    camDir.copy(camTarget).sub(camHead);
+    const camLen = camDir.length();
+    camDir.normalize();
+    camRay.set(camHead, camDir);
+    camRay.far = camLen;
+    const camHit = camRay.intersectObjects(wallMeshes, false)[0];
+    if (camHit) camTarget.copy(camHead).addScaledVector(camDir, Math.max(camHit.distance - 0.35, 0.9));
+    camPos.lerp(camTarget, Math.min(dt * 8, 1));
+    camera.position.copy(camPos);
+    camera.lookAt(pos.x, 1.0, pos.z);
+  }
+
+  renderer.render(scene, camera);
+}
+tick();
+</script>
+</body>
+</html>
